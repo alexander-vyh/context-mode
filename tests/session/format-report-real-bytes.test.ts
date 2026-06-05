@@ -191,3 +191,102 @@ describe("formatReport — Phase 8 realBytes opt", () => {
     expect(text).toMatch(/Your AI talks less, remembers more, costs less/);
   });
 });
+
+describe("formatReport — section 3 receipt: a chat cannot keep more out than all-time", () => {
+  // Regression: the "scope, getting wider" receipt printed a per-chat
+  // "kept out" LARGER than the lifetime "kept out" — impossible, since one
+  // conversation is a subset of all-time. Root cause: `convBytes` uses the
+  // 3-term real-bytes basis (eventDataBytes + bytesAvoided + snapshotBytes)
+  // while `lifetimeBytes` used `multiAdapter.totalBytes`, a 2-term scan that
+  // omits `bytesAvoided` (the dominant "kept out" term). The two figures must
+  // share one basis so the part can never exceed the whole.
+  const MB = 1024 * 1024;
+
+  // Parse "<label>: <num> <unit> kept out" → bytes, for whatever unit kb() chose.
+  function keptOutBytes(text: string, label: string): number {
+    const m = text.match(new RegExp(`${label}:\\s*([\\d.]+)\\s*(B|KB|MB|GB)\\b`));
+    if (!m) throw new Error(`"${label}:" kept-out figure not found in:\n${text}`);
+    const mult: Record<string, number> = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 };
+    return parseFloat(m[1]) * (mult[m[2]] ?? 1);
+  }
+
+  test("'All your work' kept-out >= 'This chat' kept-out (same byte basis for both)", () => {
+    // This conversation: 42 MB kept out (3-term real bytes).
+    const conversationRealBytes: RealBytesStats = {
+      eventDataBytes: 10 * MB,
+      bytesAvoided:   30 * MB,
+      bytesReturned:   1 * MB,
+      snapshotBytes:   2 * MB,
+      totalSavedTokens: Math.floor((10 * MB + 30 * MB + 2 * MB) / 4),
+    };
+    // Lifetime is a SUPERSET of this conversation: 50 MB kept out.
+    const lifetimeRealBytes: RealBytesStats = {
+      eventDataBytes: 20 * MB,
+      bytesAvoided:   28 * MB,
+      bytesReturned:   3 * MB,
+      snapshotBytes:   2 * MB,
+      totalSavedTokens: Math.floor((20 * MB + 28 * MB + 2 * MB) / 4),
+    };
+
+    const text = formatReport(baseReport(), "1.0.111", null, {
+      conversation: baseConversation(),
+      lifetime: baseLifetime(),
+      realBytes: { lifetime: lifetimeRealBytes, conversation: conversationRealBytes },
+      // The trigger: a multi-adapter scan whose 2-term totalBytes (7.3 MB, no
+      // bytesAvoided) is far smaller than the real kept-out. Pre-fix the
+      // renderer preferred this, printing an impossible "part > whole".
+      multiAdapter: {
+        totalEvents: 16_366,
+        totalSessions: 411,
+        totalBytes: 7.3 * MB,
+        perAdapter: [],
+      },
+      ...STABLE_OPTS,
+    });
+
+    const thisChat = keptOutBytes(text, "This chat");
+    const allWork = keptOutBytes(text, "All your work");
+
+    // A single conversation cannot keep more out of context than all work.
+    expect(allWork).toBeGreaterThanOrEqual(thisChat);
+  });
+
+  test("opener 'kept out' figure uses realBytes.lifetime, not the smaller multiAdapter scan", () => {
+    // Blast-radius guard. `lifetimeBytes` feeds THREE kb() byte displays: the
+    // opener (line ~2060), the section-3 receipt (the test above), and the
+    // section-4 "kept X out of context" line. (The section-4 *dollar* headline
+    // is driven by lifetimeTokens, NOT lifetimeBytes, so this fix does not move
+    // it — only these byte figures.) The fix makes realBytes.lifetime WIN over
+    // multiAdapter.totalBytes for that basis. Pin the precedence at the opener,
+    // so a regression in section 3 isn't the only thing that fails.
+    //
+    // Pre-fix the opener used multiAdapter.totalBytes (7.3 MB); post-fix it
+    // uses the 50 MB realBytes basis. Asserting "> the multiAdapter total"
+    // is RED pre-fix (7.3 is not > 7.3) and GREEN post-fix (50 > 7.3).
+    const lifetimeRealBytes: RealBytesStats = {
+      eventDataBytes: 20 * MB,
+      bytesAvoided:   28 * MB,
+      bytesReturned:   3 * MB,
+      snapshotBytes:   2 * MB, // keptOut basis = 50 MB
+      totalSavedTokens: Math.floor((20 * MB + 28 * MB + 2 * MB) / 4),
+    };
+    const multiAdapterTotal = 7.3 * MB; // 2-term scan, far below the real kept-out
+
+    const text = formatReport(baseReport(), "1.0.111", null, {
+      conversation: baseConversation(),
+      lifetime: baseLifetime(),
+      realBytes: { lifetime: lifetimeRealBytes },
+      multiAdapter: { totalEvents: 16_366, totalSessions: 411, totalBytes: multiAdapterTotal, perAdapter: [] },
+      ...STABLE_OPTS,
+    });
+
+    // Opener: "context-mode kept <N> out of your context window — about ...".
+    const m = text.match(/kept\s+([\d.]+)\s*(B|KB|MB|GB)\b\s+out of your context window/);
+    if (!m) throw new Error(`opener "kept … out of your context window" line not found in:\n${text}`);
+    const mult: Record<string, number> = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 };
+    const openerKeptOut = parseFloat(m[1]) * (mult[m[2]] ?? 1);
+
+    // realBytes.lifetime (50 MB) must drive the opener, not the 7.3 MB scan.
+    expect(openerKeptOut).toBeGreaterThan(multiAdapterTotal);
+  });
+});

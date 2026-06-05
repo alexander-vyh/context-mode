@@ -2007,11 +2007,30 @@ function renderNarrative5Section(args: {
   // Bytes from realBytes when present, else derive from tokens (×4 — same
   // ratio Phase 8 uses everywhere). All-work bytes drives the opener tally
   // + the section-3 receipt + section-4 cost example.
-  const lifetimeBytes = (multiAdapter?.totalBytes && multiAdapter.totalBytes > 0)
-    ? multiAdapter.totalBytes
-    : lifetimeTokensWithout * 4;
+  //
+  // BOTH the per-chat and lifetime figures MUST use one "kept out" basis:
+  // eventDataBytes + bytesAvoided + snapshotBytes. Lifetime previously used
+  // multiAdapter.totalBytes (a 2-term dataBytes+rescueBytes scan that omits
+  // bytesAvoided — the dominant term), so the section-3 receipt could print a
+  // per-chat "kept out" LARGER than the lifetime total (part > whole). Prefer
+  // realBytes.lifetime (which server.ts folds all-session content bytes into),
+  // falling back to the multi-adapter scan, then the token estimate.
+  // NOTE: deliberately NO `+ rb.contentBytes`. Indexed content bytes are
+  // already folded into `bytesAvoided` on both tiers (server.ts folds
+  // getContentBytesAllSessions into lifetime.bytesAvoided; the conversation
+  // sessionId branch folds getContentBytesForSession into bytesAvoided).
+  // `contentBytes` is a duplicate informational copy of those same bytes —
+  // adding it here would double-count and silently inflate every "kept out"
+  // figure (opener tally, daily average, section-4 cost) by the content total.
+  const keptOutBytes = (rb: RealBytesStats): number =>
+    rb.eventDataBytes + rb.bytesAvoided + rb.snapshotBytes;
+  const lifetimeBytes = realBytes?.lifetime
+    ? keptOutBytes(realBytes.lifetime)
+    : (multiAdapter?.totalBytes && multiAdapter.totalBytes > 0)
+      ? multiAdapter.totalBytes
+      : lifetimeTokensWithout * 4;
   const convBytes = realBytes?.conversation
-    ? (realBytes.conversation.eventDataBytes + realBytes.conversation.bytesAvoided + realBytes.conversation.snapshotBytes)
+    ? keptOutBytes(realBytes.conversation)
     : conversationTokens * 4;
 
   // ── Days alive of THE CONVERSATION (section 1).
